@@ -21,6 +21,21 @@ public sealed class BackupInfo
     public string WebKeyFile => Get("webKeyFile");
     public bool SubEnable => Get("subEnable").Equals("true", StringComparison.OrdinalIgnoreCase);
     public int SubPort => int.TryParse(Get("subPort"), out var p) ? p : 2096;
+    public string TimeZone => Get("timeLocation");
+    public bool TelegramBotEnabled => Get("tgBotEnable").Equals("true", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Folds a -wal file (if any) into the main database so it is one self-contained file.</summary>
+    public static void Consolidate(string path)
+    {
+        using (var con = Open(path))
+        {
+            Exec(con, "PRAGMA wal_checkpoint(TRUNCATE);");
+            Exec(con, "PRAGMA journal_mode=DELETE;");
+        }
+        SqliteConnection.ClearAllPools();
+        foreach (var ext in new[] { "-wal", "-shm" })
+            try { if (File.Exists(path + ext)) File.Delete(path + ext); } catch { /* ignore */ }
+    }
 
     public static string NormalizeBasePath(string? path)
     {

@@ -44,6 +44,8 @@ public sealed class MainForm : Form
     private readonly CheckBox _doRestore = new() { Text = "Restore the backup", AutoSize = true, Checked = true };
     private readonly CheckBox _doSsl = new() { Text = "Get SSL certificate", AutoSize = true, Checked = true };
     private readonly CheckBox _doFirewall = new() { Text = "Open firewall ports", AutoSize = true, Checked = true };
+    private readonly CheckBox _doTune = new() { Text = "Speed and stability tweaks (BBR, swap, time sync)", AutoSize = true, Checked = true };
+    private readonly CheckBox _doFreePorts = new() { Text = "Free ports taken by nginx/apache", AutoSize = true, Checked = true };
     private readonly CheckBox _remember = new() { Text = "Remember password and token on this PC (encrypted)", AutoSize = true };
 
     // Actions
@@ -52,6 +54,13 @@ public sealed class MainForm : Form
     private readonly Button _btnStart = new() { Text = "Start setup", AutoSize = true };
     private readonly Button _btnCancel = new() { Text = "Cancel", AutoSize = true, Enabled = false };
     private readonly Button _btnOpen = new() { Text = "Open panel", AutoSize = true };
+
+    // Manage
+    private readonly Button _btnHealth = new() { Text = "Health check", AutoSize = true };
+    private readonly Button _btnRestart = new() { Text = "Restart panel", AutoSize = true };
+    private readonly Button _btnLogs = new() { Text = "Panel logs", AutoSize = true };
+    private readonly Button _btnRenew = new() { Text = "Renew SSL", AutoSize = true };
+    private readonly Button _btnBackup = new() { Text = "Download backup", AutoSize = true };
 
     private readonly RichTextBox _log = new()
     {
@@ -163,8 +172,21 @@ public sealed class MainForm : Form
         var g4 = Group("4  What to do", out var t4);
         AddRow(t4, "", Flow(_doInstall, _doRestore));
         AddRow(t4, "", Flow(_doSsl, _doFirewall));
+        AddRow(t4, "", Flow(_doFreePorts));
+        AddRow(t4, "", Flow(_doTune));
         AddRow(t4, "", _remember);
         Stack(g4);
+
+        var g5 = Group("5  Manage the server", out var t5);
+        AddRow(t5, "", Flow(_btnHealth, _btnRestart, _btnLogs));
+        AddRow(t5, "", Flow(_btnRenew, _btnBackup));
+        AddRow(t5, "", new Label
+        {
+            AutoSize = true, MaximumSize = new Size(LogicalToDeviceUnits(410), 0), ForeColor = SystemColors.GrayText,
+            Text = "Uses the server login above. Health check also tests DNS, every port and the certificate from this PC. " +
+                   "Download backup saves the live database into the Backup folder.",
+        });
+        Stack(g5);
 
         _btnStart.BackColor = Accent;
         _btnStart.ForeColor = Color.White;
@@ -318,9 +340,14 @@ public sealed class MainForm : Form
         _btnStart.Click += async (_, _) => await RunSetupAsync();
         _btnCancel.Click += (_, _) => { _cts?.Cancel(); Log("Cancelling...", LogKind.Warn); };
         _btnOpen.Click += (_, _) => { if (TryParsePanelUrl(out var u, out _)) OpenUrl(u!.ToString()); };
+        _btnHealth.Click += async (_, _) => await HealthCheckAsync();
+        _btnRestart.Click += async (_, _) => await RunToolAsync("restart", "Restarting the panel...");
+        _btnLogs.Click += async (_, _) => await RunToolAsync("logs", "Reading the panel log...");
+        _btnRenew.Click += async (_, _) => await RunToolAsync("renew", "Renewing the certificate...");
+        _btnBackup.Click += async (_, _) => await DownloadBackupAsync();
         FormClosing += (_, e) =>
         {
-            if (_cts is not null && MessageBox.Show(this, "Setup is still running. Stop it and close?", Text,
+            if (_cts is not null && MessageBox.Show(this, "A task is still running. Stop it and close?", Text,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.No)
             { e.Cancel = true; return; }
             _cts?.Cancel();
@@ -460,9 +487,18 @@ public sealed class MainForm : Form
         if (interactive) SetBusy(true, "Checking DNS...");
         try
         {
-            var ips = await DnsTools.ResolveARecordsAsync(uri!.Host);
-            var list = ips.Count == 0 ? "nothing" : string.Join(", ", ips);
-            if (ip.Length > 0 && ips.Contains(ip))
+            var dns = await DnsTools.ResolveAsync(uri!.Host);
+            var list = dns.A.Count == 0 ? "nothing" : string.Join(", ", dns.A);
+            if (dns.AAAA.Count > 0)
+                Log($"[WARN] {uri.Host} also has an IPv6 (AAAA) record: {string.Join(", ", dns.AAAA)}. " +
+                    "Let's Encrypt and IPv6 users will use it - delete it in Cloudflare unless it is this server's IPv6.");
+            if (dns.Proxied)
+            {
+                Log($"[WARN] {uri.Host} is behind the Cloudflare proxy (orange cloud: {list}). " +
+                    "Turn it grey (DNS only) - the panel port and Xray TLS do not work through the proxy.");
+                return false;
+            }
+            if (ip.Length > 0 && dns.A.Contains(ip))
             {
                 Log($"[OK] {uri.Host} points to {list}");
                 return true;
@@ -478,7 +514,7 @@ public sealed class MainForm : Form
     {
         if (!TryGetTarget(out var target)) return;
         if (!TryParsePanelUrl(out var uri, out var err)) { Warn(err); return; }
-        if (!(_doInstall.Checked || _doRestore.Checked || _doSsl.Checked || _doFirewall.Checked))
+        if (!(_doInstall.Checked || _doRestore.Checked || _doSsl.Checked || _doFirewall.Checked || _doTune.Checked || _doFreePorts.Checked))
         { Warn("Tick at least one step under \"What to do\"."); return; }
         if (_doRestore.Checked && _backup is null) { Warn("Choose a valid backup file first."); return; }
         var cfToken = _cfUpdate.Checked ? _cfToken.Text.Trim() : "";
@@ -494,7 +530,9 @@ public sealed class MainForm : Form
         confirm.AppendLine();
         if (_doInstall.Checked) confirm.AppendLine("- Install / update 3x-ui");
         if (_doRestore.Checked) confirm.AppendLine("- Replace the server's 3x-ui database with " + Path.GetFileName(_backup!.SourcePath));
-        if (_cfUpdate.Checked) confirm.AppendLine($"- Point {domain} to {target.Host} in Cloudflare");
+        if (_cfUpdate.Checked) confirm.AppendLine($"- Point {domain} to {target.Host} in Cloudflare (and remove its old IPv6 record)");
+        if (_doTune.Checked) confirm.AppendLine("- Turn on BBR, time sync and swap; set the timezone");
+        if (_doFreePorts.Checked) confirm.AppendLine("- Stop nginx/apache if they use the panel or inbound ports");
         if (_doSsl.Checked) confirm.AppendLine($"- Get a Let's Encrypt certificate for {domain}");
         if (_doFirewall.Checked) confirm.AppendLine("- Open the panel and inbound ports in the firewall");
         confirm.AppendLine();
@@ -515,7 +553,7 @@ public sealed class MainForm : Form
             if (_cfUpdate.Checked)
             {
                 Log("==> Updating Cloudflare DNS", LogKind.Step);
-                Log("[OK] " + await DnsTools.UpdateCloudflareAsync(cfToken, domain, target.Host, ct));
+                foreach (var m in await DnsTools.UpdateCloudflareAsync(cfToken, domain, target.Host, ct)) Log("[OK] " + m);
             }
 
             // 2. DNS sanity check when the cert is validated over HTTP
@@ -563,6 +601,9 @@ public sealed class MainForm : Form
                 ["DO_RESTORE"] = _doRestore.Checked ? "1" : "0",
                 ["DO_SSL"] = _doSsl.Checked ? "1" : "0",
                 ["DO_FW"] = _doFirewall.Checked ? "1" : "0",
+                ["DO_TUNE"] = _doTune.Checked ? "1" : "0",
+                ["DO_FREEPORTS"] = _doFreePorts.Checked ? "1" : "0",
+                ["TIMEZONE"] = _backup?.TimeZone ?? "",
             };
             var exit = await Task.Run(() => Remote.RunSetup(target, uploadCopy, vars, line => Log(line), ct), ct);
             if (exit != 0) throw new InvalidOperationException($"The server script stopped with exit code {exit}. See the log above.");
@@ -579,6 +620,7 @@ public sealed class MainForm : Form
                 Log("[WARN] Could not open the panel from this PC: " + Friendly(ex));
                 Log("     If the server check passed, a firewall at your VPS provider may be blocking port " + panelPort + ".");
             }
+            await CheckPortsFromPcAsync(target.Host, domain, ports, ct);
             if (!await CheckDnsAsync(interactive: false))
                 Log("     DNS changes can take a few minutes to reach every network.");
 
@@ -588,6 +630,9 @@ public sealed class MainForm : Form
             if (_backup is not null && _doRestore.Checked)
                 Log($"     Login: {string.Join(", ", _backup.AdminUsers)} with your old password");
             Log($"     Ports in use: {string.Join(", ", ports)} (open these in your VPS provider's firewall too, if it has one)");
+            if (_backup?.TelegramBotEnabled == true)
+                Log("[WARN] Your Telegram bot is on. Stop x-ui on the OLD server (or turn its bot off) - two panels with the same bot token fight over messages.");
+            Log("     Users whose configs use the old IP address instead of the domain must re-import their link from the panel.");
             _status.Text = "Done";
         }
         catch (OperationCanceledException) { Log("[WARN] Setup cancelled."); _status.Text = "Cancelled"; }
@@ -602,11 +647,105 @@ public sealed class MainForm : Form
         }
     }
 
+    // ------------------------------------------------------------------ manage
+
+    private (string domain, int panelPort, SortedSet<int> ports)? ManageContext()
+    {
+        if (!TryParsePanelUrl(out var uri, out var err)) { Warn(err); return null; }
+        var ports = _backup?.RequiredPorts(uri!.Port) ?? new SortedSet<int> { 80, 443, uri!.Port };
+        return (uri.Host.ToLowerInvariant(), uri.Port, ports);
+    }
+
+    private async Task RunToolAsync(string action, string status)
+    {
+        if (!TryGetTarget(out var t) || ManageContext() is not { } ctx) return;
+        var cfToken = _cfUpdate.Checked ? _cfToken.Text.Trim() : "";
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        SetBusy(true, status);
+        try
+        {
+            var exit = await Task.Run(() => Remote.RunTool(t!, action, ctx.domain, cfToken, ctx.ports, line => Log(line), ct), ct);
+            if (exit != 0) Log($"[ERROR] The server reported a problem (exit code {exit}).");
+            _status.Text = exit == 0 ? "Done" : "Failed - see the log";
+        }
+        catch (OperationCanceledException) { Log("[WARN] Cancelled."); }
+        catch (Exception ex) { Log("[ERROR] " + Friendly(ex)); _status.Text = "Failed - see the log"; }
+        finally { _cts.Dispose(); _cts = null; SetBusy(false, keepStatus: true); }
+    }
+
+    private async Task HealthCheckAsync()
+    {
+        if (!TryGetTarget(out var t) || ManageContext() is not { } ctx) return;
+        var cfToken = _cfUpdate.Checked ? _cfToken.Text.Trim() : "";
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        SetBusy(true, "Health check...");
+        try
+        {
+            var exit = await Task.Run(() => Remote.RunTool(t!, "health", ctx.domain, cfToken, ctx.ports, line => Log(line), ct), ct);
+            Log("==> Checks from this PC", LogKind.Step);
+            await CheckDnsAsync(interactive: false);
+            await CheckPortsFromPcAsync(t!.Host, ctx.domain, ctx.ports, ct);
+            try
+            {
+                var url = TryParsePanelUrl(out var u, out _) ? u! : new Uri($"https://{ctx.domain}:{ctx.panelPort}/");
+                var code = await Remote.CheckPanelAsync(url, t.Host, ct);
+                Log($"[OK] Panel opens over HTTPS with a valid certificate (HTTP {code})");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Log("[WARN] Panel did not open from this PC: " + Friendly(ex));
+            }
+            _status.Text = exit == 0 ? "Health check finished" : "Health check found problems";
+        }
+        catch (OperationCanceledException) { Log("[WARN] Cancelled."); }
+        catch (Exception ex) { Log("[ERROR] " + Friendly(ex)); _status.Text = "Failed - see the log"; }
+        finally { _cts.Dispose(); _cts = null; SetBusy(false, keepStatus: true); }
+    }
+
+    private async Task CheckPortsFromPcAsync(string ip, string domain, IEnumerable<int> ports, CancellationToken ct)
+    {
+        Log("==> Testing ports from this PC (outside the server)", LogKind.Step);
+        if (await Remote.LocalProxyInterceptsAsync(ct))
+            Log("     A VPN/proxy app is on on this PC - the test goes through it, which is fine as long as it is connected.");
+        var result = await Remote.CheckPortsAsync(ip, domain, ports, ct);
+        foreach (var (port, open) in result)
+            Log(open ? $"[OK] {port} answers (TLS)" : $"[WARN] {port} does not answer");
+        if (result.Values.Any(o => !o))
+            Log("     A port that does not answer is either: an inbound that is off, failed or not TLS (check the panel), " +
+                "or blocked by your VPS provider's firewall / security group. Oracle, AWS, Google Cloud, Azure and Alibaba " +
+                "block ports by default - open them on the provider's website.");
+    }
+
+    private async Task DownloadBackupAsync()
+    {
+        if (!TryGetTarget(out var t)) return;
+        var folder = File.Exists(_backupPath.Text.Trim())
+            ? Path.GetDirectoryName(_backupPath.Text.Trim())!
+            : Path.Combine(AppContext.BaseDirectory, "Backup");
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
+        SetBusy(true, "Downloading backup...");
+        try
+        {
+            var saved = await Task.Run(() => Remote.DownloadBackup(t!, folder, line => Log(line), ct), ct);
+            _status.Text = "Backup saved";
+            if (MessageBox.Show(this, $"Backup saved:\n{saved}\n\nUse it as the selected backup?", Text,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                SetBackup(saved);
+        }
+        catch (OperationCanceledException) { Log("[WARN] Cancelled."); }
+        catch (Exception ex) { Log("[ERROR] " + Friendly(ex)); _status.Text = "Failed - see the log"; }
+        finally { _cts.Dispose(); _cts = null; SetBusy(false, keepStatus: true); }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void SetBusy(bool busy, string? status = null, bool keepStatus = false)
     {
-        foreach (var b in new[] { _btnTest, _btnDns, _btnStart }) b.Enabled = !busy;
+        foreach (var b in new[] { _btnTest, _btnDns, _btnStart, _btnHealth, _btnRestart, _btnLogs, _btnRenew, _btnBackup })
+            b.Enabled = !busy;
         _btnCancel.Enabled = busy && _cts is not null;
         _progress.Visible = busy;
         UseWaitCursor = busy;

@@ -27,6 +27,34 @@ Windows SmartScreen may warn the first time because the exe is not code-signed: 
 | Firewall | Opens the panel, subscription and inbound ports in ufw, firewalld or iptables. |
 | Verify | Checks the panel answers over HTTPS with a trusted certificate, from the server and from your PC. |
 
+## Common VPS problems it handles
+
+| Problem | What the app does |
+|---|---|
+| Fresh VPS busy with automatic updates ("Could not get lock") | Waits for apt to finish, repairs dpkg |
+| Server cannot resolve domains / reach GitHub | Adds public DNS servers (1.1.1.1, 8.8.8.8) |
+| nginx / apache already using port 80 or 443 | Stops and disables them (option) |
+| Wrong clock breaks TLS and VLESS | Turns on time sync, sets the timezone from your backup |
+| Small VPS runs out of memory | Creates a 1 GB swap file when RAM < 2 GB |
+| Slow speeds | Enables BBR and network tuning, raises the open-files limit |
+| Domain behind the Cloudflare proxy (orange cloud) | Detects it; with a token switches it to DNS only |
+| Old IPv6 (AAAA) record still pointing to the old server | Detects it; with a token removes it |
+| Let's Encrypt rate limit | Explains it and falls back to ZeroSSL when an email is set |
+| Port 80 unreachable / CAA record / bad Cloudflare token | Shows the exact reason instead of a generic failure |
+| VPS provider firewall (Oracle, AWS, GCP, Azure...) blocking ports | Tests every port from your PC with a real TLS handshake |
+| Oracle Cloud iptables rules | Opens the ports in iptables and saves them |
+| Old server still running the same Telegram bot | Warns you to stop it |
+| Low disk space, unsupported OS (CentOS 7) | Checks and warns before starting |
+
+## Manage the server
+
+The **Manage the server** buttons use the same SSH login:
+
+- **Health check** - service, Xray, CPU/RAM/disk, ports, certificate expiry, BBR, clock, firewall, recent errors, plus DNS, port and HTTPS checks from your PC.
+- **Restart panel**, **Panel logs**
+- **Renew SSL** - forces a certificate renewal now.
+- **Download backup** - saves the live database to the Backup folder as `<ip>_<date>_<time>.db`.
+
 Settings are remembered in `%AppData%\MaizyVpsSetup` (passwords only if you tick the option, encrypted with Windows DPAPI). Each run's log is saved in `%AppData%\MaizyVpsSetup\logs`.
 
 ## Build from source
