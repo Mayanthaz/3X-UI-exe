@@ -1,0 +1,13 @@
+# Private data - never commit
+Backup/
+*.db
+*.db-wal
+*.db-shm
+config.json
+
+# Build output
+bin/
+obj/
+dist/
+*.user
+.vs/
